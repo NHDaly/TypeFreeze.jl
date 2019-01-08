@@ -40,7 +40,7 @@ function gen_eval_f(funcexpr::Expr)
         function $escname($(function_params...))
             types = [$(types...)]
             val = funchelper(types...)
-            typedargs = [Expr(Symbol("::"), t) for t in types]
+            typedargs = [Expr(Symbol("::"), names[i], types[i]) for i in 1:length(args)]
             #@eval $finalcall = $(Expr(:$, :val))
             @eval $name($(Expr(:$, :(typedargs...)))) = $(Expr(:$, :val))
             return val
