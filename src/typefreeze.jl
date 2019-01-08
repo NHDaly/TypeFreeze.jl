@@ -112,6 +112,19 @@ end
 paramexpr(name, e::Symbol) = esc(e)
 paramexpr(name, e::Expr) = :($(name)::$(argtype(e)))
 
+"""
+    @typefreeze function f(x) ... end
+
+"Freezes" the output of a function for given parameter types.
+
+Provides function output memoization, keyed by input types. This is implemented using
+Julia's built-in dispatch mechanisms, by using `@eval` to generate a new method for each
+unique input types tuple, whose function body is simply the return value.
+
+This memoization occurs at the end of the first invocation, such that the function has a
+one-time cost not unlike the compilation penalty incurred when type inference attempts to
+compile a new instantiation of a method for new input parameters.
+"""
 macro typefreeze(funcexpr)
     dump(funcexpr)
     @assert funcexpr.head == :function
