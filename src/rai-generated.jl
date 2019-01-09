@@ -1,7 +1,7 @@
 module RAIGenerated
 using InteractiveUtils
 
-include("typefreeze.jl")
+include("utilities.jl")
 
 """
     @rAI_generated function f(x) :(x+1) end

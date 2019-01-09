@@ -1,116 +1,26 @@
+module TypeFreeze
 
-#   # This is the idea:
-#   function expensive_helper()
-#       println("...Expensive calculation...")
-#   end
-#   function expensive()
-#       @eval expensive() = $(expensive_helper())
-#       return @eval expensive()
-#   end
-#
-#   println("Calling the first time:")
-#   expensive()
-#
-#   println("Calling the second time:")
-#   expensive()
-#
-#   #function foo_helper(::Val{x}, ::Val{y}) where {x, y}
-#   #    println("foo_helper1")
-#   #    @show x,y
-#   #end
-#   #function foo_helper2(x::Val, y::Val)
-#   #    println("foo_helper2")
-#   #    @eval foo_helper2(x,y) = $(foo_helper(x,y))
-#   #    return @eval foo_helper2($x,$y)
-#   #end
-#   #function foo(x,y)
-#   #    foo_helper2(Val(x),Val(y))
-#   #end
-#   #
-#   #println("Calling the first time:")
-#   #foo(1,2)
-#   #println("Calling the second time:")
-#   #foo(1,2)
-#   #println("Calling with new values:")
-#   #foo(2,2)
-#   #println("Calling the second time:")
-#   #foo(1,2)
-#
-#   macro freeze(funcexpr)
-#       dump(funcexpr)
-#       @assert funcexpr.head == :function
-#       name = esc(funcexpr.args[1].args[1])
-#       args = funcexpr.args[1].args[2:end]
-#       escargs = [esc(a) for a in funcexpr.args[1].args[2:end]]
-#       body = esc(funcexpr.args[1].args[2])
-#       argtypes_call = :(typeof.($args))
-#       innerfunc = :($name($argtypes_call) = 3)
-#       quote
-#           function funchelper($(escargs...))
-#               $body
-#           end
-#           function $name($(escargs...))
-#               eval(Expr(:quote, $innerfunc))
-#                 #funchelper($(args...))
-#               #return eval($name($(args...)))
-#           end
-#       end
-#   end
-#
-#   @freeze function bar(x,y)
-#       x,y
-#   end
-#
-#   bar(3,3)
-#
-#
+using InteractiveUtils  # For examining the outputs
 
-
-
-# ========================
-
-function typed_helper(::Type{T}) where {T}
+# This is the idea we want to implement:
+function widened_typeof_helper(::Type{T}) where {T}
     println("typed_helper(::$T)")
     widen(T)
 end
-function typed(::T) where {T}
-    val = typed_helper(T)
-    @eval typed(::$T) = $val
+function widened_typeof(::T) where {T}
+    val = widened_typeof_helper(T)
+    @eval widened_typeof(::$T) = $val
     return val
 end
 
-typed(Int64(3))
+# Before it's called and memoized, the function is several lines long:
+length((@code_typed widened_typeof(6))[1].code) > 1
+# Calling the function memoizes its result as a newly defined method.
+widened_typeof(Int64(3))
+# Now, the entire body of the function is simply `return Int128`
+(@code_typed widened_typeof(6))[1].code == [:(return $(Int128))]
 
-function argnames(args::Array)
-    tmpcount = 0
-    out = []
-    for a in args
-        name = argname(a)
-        if name == nothing
-            tmpcount += 1
-            name = Symbol("_$tmpcount")
-        end
-        push!(out, name)
-    end
-    out
-end
-argname(x::Symbol) = esc(x)
-function argname(e::Expr)
-    @assert e.head == Symbol("::")
-    return length(e.args) == 2 ? esc(e.args[1]) : nothing
-end
-argtypes(args::Array) = [argtype(a) for a in args]
-argtype(x::Symbol) = :(typeof($x))
-function argtype(e::Expr)
-    @assert e.head == Symbol("::")
-    e.args[end]
-end
-function paramexprs(arr::Array)
-    names = argnames(arr)
-    return [paramexpr(names[i], arr[i]) for i in 1:length(arr)]
-end
-paramexpr(name, e::Symbol) = esc(e)
-paramexpr(name, e::Expr) = :($(name)::$(argtype(e)))
+include("utilities.jl")
 
 """
     @typefreeze function f(x) ... end
@@ -151,24 +61,51 @@ macro typefreeze(funcexpr)
     end
 end
 
-@typefreeze function f(x::Int8, y, ::Number)
+# ------- Tests: --------
+
+@typefreeze function g(x::Int8, y, ::Number)
     return x*y
 end
-@code_typed f(Int8(2), 5.0, 3)
-methods(f)
+methods(g)
+@code_typed g(Int8(2), 5.0, 3)
+g(Int8(2), 5.0, 3)
+methods(g)
+@code_typed g(Int8(2), 5.0, 3)
+g(Int8(2), 4, 3)
+g(Int8(2), 5, 3)
+
+
+# Real example:
+
+# FixedPointDecimals.max_exp10(::Type{T}) where T
+# In that package, this is manually "frozen" after its definition via manual @evals:
+#   @eval max_exp10(::Type{Int128}) = $(max_exp10(Int128))  # Freeze for Int128, since it doesn't fold.
+
+@typefreeze function max_exp10(x)  # Note this should of course be ::Type{T} where T, but that doesn't work yet.
+    T = typeof(x)
+    W = widen(T)
+    type_max = W(typemax(T))
+
+    powt = one(W)
+    ten = W(10)
+    exponent = 0
+
+    while type_max > powt
+        powt *= ten
+        exponent += 1
+    end
+
+    exponent - 1
+end
+
+max_exp10(Int8(0))
+@code_typed max_exp10(Int8(0))
+# Even though this creates a BigInt, it can still be const-folded!
+# This process is basically "manual (const) folding", where you're demanding folding even
+# when the input might not be (provably) Const.
+max_exp10(Int128(0))
+@code_typed max_exp10(Int128(0))
 
 
 
-#
-#printer(x::Number) = typeof(x)
-#printer(::Int64) = Int
-#
-#printer(2)
-#
-#
-#macro argnames()
-#    quote function $(esc(:foo))(_x1, $(esc(:_x1))) end
-#    end
-#end
-#
-#@argnames()
+end
