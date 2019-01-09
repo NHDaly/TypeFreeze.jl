@@ -36,35 +36,81 @@ one-time cost not unlike the compilation penalty incurred when type inference at
 compile a new instantiation of a method for new input parameters.
 """
 macro typefreeze(funcexpr)
+    typefreeze_helper(funcexpr, __module__)
+end
+function typefreeze_helper(funcexpr, __module__)
     dump(funcexpr)
-    @assert funcexpr.head == :function
-    name = funcexpr.args[1].args[1]
+    @assert(funcexpr.head == :function || Base.is_short_function_def(funcexpr))
+    signature = funcexpr.args[1]
+    func_callexpr = call_expr(signature)
+    name = func_callexpr.args[1]
+
     escname = esc(name)
-    args = funcexpr.args[1].args[2:end]
-    types = argtypes(args)
-    names = argnames(args)
+    args = func_callexpr.args[2:end]
     function_params = paramexprs(args)
+    names = argnames(function_params)
+    escnames = [esc(n) for n in argnames(function_params)]
+
+    @show function_params
+
+    # Special case for Type{T} types:
+    #if isa(v, Expr) && v.head == :curly && v.args[1] == :Type
+    #    v = v.args[2]
+    #end
+    #v
+
+
+    esctypes = [esc(t) for t in argtypes(function_params)]
     escargs = [esc(a) for a in args]
-    body = esc(funcexpr.args[2])
-    methods_helpername = gensym(name)
+    body = funcexpr.args[2]
+    escbody = esc(body)
+
+    main_signature = deepcopy(signature)
+    call_expr(main_signature).args[2:end] = function_params
+
+    # TODO: There is a bug in the julia macro-expander, preventing escaping the entire signature.
+    # Therefore, for now, we have to manually escape its internals
+    methods_helpername = gensym("$(name)_methods")
+    methods_signature = deepcopy(main_signature)
+    call_expr(methods_signature).args[1] = esc(methods_helpername)
+    call_expr(methods_signature).args[2:end] = [esc(p) for p in function_params]
+    # Escape the type parameters in where clauses (TODO: remove when bug is fixed)
+    sigexpr = methods_signature
+    while sigexpr.head != :call
+        sigexpr.args[2] = esc(sigexpr.args[2])
+        sigexpr = sigexpr.args[1]
+    end
+
+    generator_helpername = gensym("$(name)_generator")
+    generator_signature = deepcopy(signature)
+    call_expr(generator_signature).args[1] = generator_helpername
+
     quote
-        function func_generator($(escargs...))
-            $body
-        end
-        function $(esc(methods_helpername))($(function_params...))
-            types = [$(types...)]
-            val = func_generator($(names...))
-            typedargs = [Expr(Symbol("::"), t) for t in types]
-            #@eval $finalcall = $(Expr(:$, :val))
-            @eval @inline $methods_helpername($(Expr(:$, :(typedargs...)))) = $(Expr(:$, :val))
+        # This is the user's original function:
+        $(esc(Expr(:function, generator_signature, body)))
+        # This is the new implementation, which tacks new methods onto itself for each new
+        # argument types tuple.
+        # TODO: when the macro expander bug is fixed, esc the signature here instead.
+        $(Expr(:function, (methods_signature), quote
+            # Get actual return value from user's function:
+            val = $(esc(generator_helpername))($(escnames...))
+            # Compute the actual runtime types of the input arguments:
+            types = [$(esctypes...)]
+            typedargs = Tuple(Expr(Symbol("::"), t) for t in types)
+            @eval $__module__ @inline $methods_helpername($(Expr(:$, :(typedargs...)))) = $(Expr(:$, :val))
+            #@eval @show methods($methods_helpername)
             return val
-        end
+        end))
         # The actual function simply delegates to the helper above
-        function $escname($(function_params...))
-            $(esc(methods_helpername))($(names...))
-        end
+        # TODO: when the macro expander bug is fixed, esc the signature here instead.
+        $(esc(Expr(:function, (main_signature), quote
+            $methods_helpername($(names...))
+        end)))
     end
 end
+
+#out1 = typefreeze_helper(:(myzero(x::Type{T}) where T = x), @__MODULE__)
+@macroexpand @typefreeze myzero(x::Type{T}) where T = x
 
 # -------- Illustration: ----------
 # As an example, `@typefreeze function tzero(t::Tuple) Tuple(zero(x) for x in t) end` would
@@ -104,8 +150,7 @@ foo(Int8(2), 6, 3)
 # In that package, this is manually "frozen" after its definition via manual @evals:
 #   @eval max_exp10(::Type{Int128}) = $(max_exp10(Int128))  # Freeze for Int128, since it doesn't fold.
 
-@typefreeze function max_exp10(x)  # Note this should of course be ::Type{T} where T, but that doesn't work yet.
-    T = typeof(x)
+@typefreeze function max_exp10(::Type{T}) where T
     W = widen(T)
     type_max = W(typemax(T))
 
@@ -121,13 +166,13 @@ foo(Int8(2), 6, 3)
     exponent - 1
 end
 
-max_exp10(Int8(0))
-@code_typed max_exp10(Int8(0))
+max_exp10(Int8)
+@code_typed max_exp10(Int8)
 # Even though this creates a BigInt, it can still be const-folded!
 # This process is basically "manual (const) folding", where you're demanding folding even
 # when the input might not be (provably) Const.
-max_exp10(Int128(0))
-@code_typed max_exp10(Int128(0))
+max_exp10(Int128)
+@code_typed max_exp10(Int128)
 
 
 
