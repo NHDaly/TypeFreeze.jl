@@ -46,33 +46,56 @@ macro typefreeze(funcexpr)
     function_params = paramexprs(args)
     escargs = [esc(a) for a in args]
     body = esc(funcexpr.args[2])
+    methods_helpername = gensym(name)
     quote
-        function funchelper($(escargs...))
+        function func_generator($(escargs...))
             $body
         end
-        function $escname($(function_params...))
+        function $(esc(methods_helpername))($(function_params...))
             types = [$(types...)]
-            val = funchelper($(names...))
+            val = func_generator($(names...))
             typedargs = [Expr(Symbol("::"), t) for t in types]
             #@eval $finalcall = $(Expr(:$, :val))
-            @eval $name($(Expr(:$, :(typedargs...)))) = $(Expr(:$, :val))
+            @eval @inline $methods_helpername($(Expr(:$, :(typedargs...)))) = $(Expr(:$, :val))
             return val
+        end
+        # The actual function simply delegates to the helper above
+        function $escname($(function_params...))
+            $(esc(methods_helpername))($(names...))
         end
     end
 end
 
+# -------- Illustration: ----------
+# As an example, `@typefreeze function tzero(t::Tuple) Tuple(zero(x) for x in t) end` would
+# produce the following code:
+tzero_generator(t::Tuple) = Tuple(zero(x) for x in t)
+function tzero_methods_helper(t::Tuple)
+    val = tzero_generator(t)
+    @eval @inline tzero_methods_helper(::$(typeof(t))) = $val
+    return val
+end
+tzero(t::Tuple) = tzero_methods_helper(t)
+
+tzero((1, 3, 2)) == (0, 0, 0)
+tzero((1.0,)) == (0.0,)
+# And the function is entirely memoized away:
+@code_typed(tzero((1.0,)))[1].code == [:(return $((0.0,)))]
+
 # ------- Tests: --------
 
-@typefreeze function g(x::Int8, y, ::Number)
+@typefreeze function foo(x::Int8, y, ::Number)
     return x*y
 end
-methods(g)
-@code_typed g(Int8(2), 5.0, 3)
-g(Int8(2), 5.0, 3)
-methods(g)
-@code_typed g(Int8(2), 5.0, 3)
-g(Int8(2), 4, 3)
-g(Int8(2), 5, 3)
+methods(foo)
+@code_typed foo(Int8(2), 5.0, 3)
+foo(Int8(2), 5.0, 3)
+methods(foo)
+@code_typed foo(Int8(2), 5.0, 3)
+foo(Int8(2), 4, 3)
+foo(Int8(2), 6, 3)
+
+@code_typed(foo(Int8(2), 5, 3))[1].code == [:(return $(8))]
 
 
 # Real example:
