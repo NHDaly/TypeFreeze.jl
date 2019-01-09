@@ -77,7 +77,7 @@ function typefreeze_helper(funcexpr, __module__)
     # Escape the type parameters in where clauses (TODO: remove when bug is fixed)
     sigexpr = methods_signature
     while sigexpr.head != :call
-        sigexpr.args[2] = esc(sigexpr.args[2])
+        sigexpr.args[2:end] = [esc(e) for e in sigexpr.args[2:end]]
         sigexpr = sigexpr.args[1]
     end
 
